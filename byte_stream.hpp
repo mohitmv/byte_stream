@@ -1,10 +1,9 @@
-// Original: https://github.com/mohitmv/quick/blob/master/include/quick/byte_stream.hpp
+// Original: https://github.com/mohitmv/quick @ include/quick/byte_stream.hpp
 // Author: Mohit Saini (mohitsaini1196@gmail.com)
 
 #ifndef QUICK_BYTE_STREAM_HPP_
 #define QUICK_BYTE_STREAM_HPP_
 
-#include <iostream>
 #include <type_traits>
 #include <cstdint>
 #include <string>
@@ -13,7 +12,6 @@
 #include <tuple>
 #include <utility>
 #include <vector>
-#include <bit>
 
 namespace quick {
 
@@ -26,11 +24,11 @@ enum class Status {OK, INVALID_READ};
 template<typename T>
 std::enable_if_t<(std::is_fundamental<T>::value ||
                   std::is_enum<T>::value)>
-WritePremitiveType(void* dst, T value) {
+WritePrimitiveType(void* dst, T value) {
   std::memcpy(dst, &value, sizeof(T));
 }
 
-void WriteBuffer(void* dst, const std::byte* buffer_ptr, size_t buffer_size) {
+void WriteBuffer(void* dst, const void* buffer_ptr, size_t buffer_size) {
   std::memcpy(dst, buffer_ptr, buffer_size);
 }
 
@@ -40,24 +38,48 @@ struct has_iterator<T, std::void_t<typename T::iterator>> : std::true_type { };
 
 template<typename T, typename = void> struct has_to_bytestream : std::false_type { };
 template<typename T>
-struct has_to_bytestream<T, std::void_t<typename T::ToByteStream>> : std::true_type { };
+struct has_to_bytestream<T, std::void_t<decltype(&T::ToByteStream)>> : std::true_type { };
+
+template<typename T, typename = void> struct has_from_bytestream : std::false_type { };
+template<typename T>
+struct has_from_bytestream<T, std::void_t<decltype(&T::FromByteStream)>> : std::true_type { };
+
+template<typename T, typename = void> struct can_insert : std::false_type { };
+template<typename T>
+struct can_insert<T, std::void_t<decltype(
+                 std::declval<T>().insert(
+                   std::declval<typename T::value_type&&>()))>> : std::true_type { };
+
+template<typename T, typename = void> struct can_push_back : std::false_type { };
+template<typename T>
+struct can_push_back<T, std::void_t<decltype(
+                 std::declval<T>().push_back(
+                   std::declval<typename T::value_type&&>()))>> : std::true_type { };
+
+template<typename T>
+struct ConstCastValueType { using type = T; };
+template<typename T1, typename T2>
+struct ConstCastValueType<std::pair<const T1, T2>> { using type = std::pair<T1, T2>; };
 
 }  // namespace bytestream_impl
 
 
 class OByteStream {
-public:
+ public:
   const std::vector<std::byte>& GetBytes() const {  return output_bytes; }
   std::vector<std::byte>& GetMutableBytes() { return output_bytes; }
 
   template<typename T>
   OByteStream& operator<<(const T& input) { Write(input); return *this; }
 
+  const std::vector<std::byte>& buffer() const { return output_bytes; }
+  std::vector<std::byte>& buffer() { return output_bytes; }
+
  private:
   void Write(const std::string_view& input) {
     size_t size0 = output_bytes.size();
     output_bytes.resize(size0 + sizeof(size_t) + input.size());
-    bytestream_impl::WritePremitiveType(&output_bytes[size0], input.size());
+    bytestream_impl::WritePrimitiveType(&output_bytes[size0], input.size());
     bytestream_impl::WriteBuffer(&output_bytes[size0 + sizeof(size_t)], input.data(), input.size());
   }
 
@@ -68,13 +90,14 @@ public:
     size_t size0 = output_bytes.size();
     size_t real_input_size = sizeof(T) * input.size();
     output_bytes.resize(size0 + sizeof(size_t) + real_input_size);
-    bytestream_impl::WritePremitiveType(&output_bytes[size0], input.size());
+    bytestream_impl::WritePrimitiveType(&output_bytes[size0], input.size());
     bytestream_impl::WriteBuffer(&output_bytes[size0 + sizeof(size_t)], input.data(), real_input_size);
-    return *this;
   }
 
+
   template<typename T>
-  std::void_t<typename T::iterator> Write(const T& container) {
+  std::enable_if_t<bytestream_impl::has_iterator<T>::value>
+  Write(const T& container) {
     Write(container.size());
     for (auto& item : container) {
       Write(item);
@@ -85,9 +108,38 @@ public:
   std::enable_if_t<(std::is_fundamental<T>::value || std::is_enum<T>::value)>
   Write(T input) {
     size_t size0 = output_bytes.size();
-    str_value.resize(size0 + sizeof(T));
-    bytestream_impl::WritePremitiveType(&str_value[size0], input);
-    return *this;
+    output_bytes.resize(size0 + sizeof(T));
+    bytestream_impl::WritePrimitiveType(&output_bytes[size0], input);
+  }
+
+  template<typename... Ts>
+  void WriteTuple(
+      const std::tuple<Ts...>&,
+      std::index_sequence<sizeof...(Ts)>) { }
+
+  template<std::size_t I, typename... Ts>
+  std::enable_if_t<(I < sizeof...(Ts))>
+  WriteTuple(const std::tuple<Ts...>& input,
+                 std::index_sequence<I>) {
+    Write(std::get<I>(input));
+    WriteTuple(input, std::index_sequence<I+1>());
+  }
+
+  template<typename... Ts>
+  void Write(const std::tuple<Ts...>& input) {
+    WriteTuple(input, std::index_sequence<0>());
+  }
+
+  template<typename T1, typename T2>
+  void Write(const std::pair<T1, T2>& input) {
+    Write(input.first);
+    Write(input.second);
+  }
+
+  template<typename T>
+  std::enable_if_t<bytestream_impl::has_to_bytestream<T>::value>
+  Write(const T& input) {
+    input.ToByteStream(*this);
   }
 
   std::vector<std::byte> output_bytes;
@@ -100,8 +152,12 @@ class IByteStream {
 
   IByteStream(const std::byte* buffer, size_t len): buffer(buffer), buffer_len(len) { }
 
+  IByteStream(const std::vector<std::byte>& buffer_vec)
+    : buffer(buffer_vec.data()),
+      buffer_len(buffer_vec.size()) { }
+
   IByteStream(const std::string_view& str_view)
-      : buffer(static_cast<const std::byte*>(str_view.data())),
+      : buffer(reinterpret_cast<const std::byte*>(str_view.data())),
         buffer_len(str_view.size()) { }
 
   template<typename T>
@@ -110,6 +166,10 @@ class IByteStream {
     status = Status::INVALID_READ;
     return *this;
   }
+
+  Status GetStatus() const { return status; }
+  bool Ok() const { return status == Status::OK; }
+  bool End() const { return read_ptr == buffer_len; }
 
  private:
 
@@ -128,7 +188,7 @@ class IByteStream {
     size_t string_size;
     if (not Read(string_size)) return false;
     if (read_ptr + string_size > buffer_len) return false;
-    output = std::string_view(buffer + read_ptr, string_size);
+    output = std::string_view(reinterpret_cast<const char*>(buffer + read_ptr), string_size);
     read_ptr += string_size;
     return true;
   }
@@ -157,204 +217,74 @@ class IByteStream {
                     std::is_enum<T>::value), bool>
   Read(T& output) {
     if (read_ptr + sizeof(T) > buffer_len) return false;
-    std::memcpy(&value, buffer + read_ptr, sizeof(T));
+    std::memcpy(&output, buffer + read_ptr, sizeof(T));
     read_ptr += sizeof(T);
     return true;
   }
 
-  Status status;
-  const std::byte* buffer;
+  template<typename... Ts>
+  bool ReadTuple(
+      std::tuple<Ts...>&,
+      std::index_sequence<sizeof...(Ts)>) { return true; }
+
+  template<std::size_t I, typename... Ts>
+  std::enable_if_t<(I < sizeof...(Ts)), bool>
+  ReadTuple(std::tuple<Ts...>& output, std::index_sequence<I>) {
+    return Read(std::get<I>(output)) && 
+            ReadTuple(output, std::index_sequence<I+1>());
+  }
+
+  template<typename... Ts>
+  bool Read(std::tuple<Ts...>& output) {
+    return ReadTuple(output, std::index_sequence<0>());
+  }
+
+  template<typename T1, typename T2>
+  bool Read(std::pair<T1, T2>& output) {
+    return Read(output.first) && Read(output.second);
+  }
+
+  template<typename T>
+  std::enable_if_t<bytestream_impl::has_from_bytestream<T>::value, bool>
+  Read(T& output) {
+    output.FromByteStream(*this);
+    return status == Status::OK;
+  }
+
+  template<typename T>
+  std::enable_if_t<bytestream_impl::can_insert<T>::value, bool>
+  Read(T& output) {
+    return ReadContainer(output, [](T& container, typename T::value_type&& value_type) {
+      container.insert(std::move(value_type));
+    });
+  }
+
+  template<typename T>
+  std::enable_if_t<bytestream_impl::can_push_back<T>::value, bool>
+  Read(T& output) {
+    return ReadContainer(output, [&](T& container, typename T::value_type&& value_type) {
+      container.push_back(std::move(value_type));
+    });
+  }
+
+  template<typename T, typename Inserter>
+  bool ReadContainer(T& output, Inserter inserter) {
+    size_t container_size;
+    if (not Read(container_size)) return false;
+    for (size_t i = 0; i < container_size; ++i) {
+      typename bytestream_impl::ConstCastValueType<typename T::value_type>::type value_type;
+      if (not Read(value_type)) return false;
+      inserter(output, std::move(value_type));
+    }
+    return true;
+  }
+
+  Status status = Status::OK;
+  const std::byte* buffer = nullptr;
   size_t read_ptr = 0;
-  size_t buffer_len;
+  size_t buffer_len = 0;
 };
 
-
-namespace detail {
-
-template<typename... Ts>
-void SerializeTuple(
-    ByteStream&,
-    const std::tuple<Ts...>&,
-    std::index_sequence<sizeof...(Ts)>) {}
-
-template<std::size_t I, typename... Ts>
-std::enable_if_t<(I < sizeof...(Ts))>
-SerializeTuple(ByteStream& bs,  // NOLINT
-               const std::tuple<Ts...>& input,
-               std::index_sequence<I>) {
-  bs << std::get<I>(input);
-  SerializeTuple(bs, input, std::index_sequence<I+1>());
-}
-
-template<typename... Ts>
-void DeserializeTuple(
-    ByteStream&,
-    std::tuple<Ts...>&,
-    std::index_sequence<sizeof...(Ts)>) {}
-
-template<std::size_t I, typename... Ts>
-std::enable_if_t<(I < sizeof...(Ts))>
-DeserializeTuple(ByteStream& bs,  // NOLINT
-               std::tuple<Ts...>& output,  // NOLINT
-               std::index_sequence<I>) {
-  bs >> std::get<I>(output);
-  DeserializeTuple(bs, output, std::index_sequence<I+1>());
-}
-
-template<typename MapType>
-ByteStream& SerializeMap(ByteStream& bs, const MapType& input) {  // NOLINT
-  bs << static_cast<size_t>(input.size());
-  for (const auto& item : input) {
-    bs << item.first << item.second;
-  }
-  return bs;
-}
-
-}  // namespace detail
-
-template<typename... Ts>
-ByteStream& operator<<(ByteStream& bs, const std::tuple<Ts...>& input) {
-  detail::SerializeTuple(bs, input, std::index_sequence<0>());
-  return bs;
-}
-
-template<typename... Ts>
-ByteStream& operator>>(ByteStream& bs, std::tuple<Ts...>& output) {
-  detail::DeserializeTuple(bs, output, std::index_sequence<0>());
-  return bs;
-}
-
-template<typename T1, typename T2>
-ByteStream& operator<<(ByteStream& bs, const std::pair<T1, T2>& input) {
-  bs << input.first << input.second;
-  return bs;
-}
-
-template<typename T1, typename T2>
-ByteStream& operator>>(ByteStream& bs, std::pair<T1, T2>& output) {
-  bs >> output.first >> output.second;
-  return bs;
-}
-
-template<typename T>
-std::enable_if_t<
-  std::is_same<void,
-               decltype(
-                 std::declval<const T&>().ToByteStream(
-                   std::declval<OByteStream&>()))>::value,
-  ByteStream>& operator<<(ByteStream& bs, const T& input) {
-  input.ToByteStream(static_cast<OByteStream&>(bs));
-  return bs;
-}
-
-template<typename T>
-std::enable_if_t<
-  std::is_same<void,
-               decltype(
-                 std::declval<T&>().FromByteStream(
-                   std::declval<IByteStream&>()))>::value,
-  ByteStream>& operator>>(ByteStream& bs, T& output) {
-  output.FromByteStream(static_cast<IByteStream&>(bs));
-  return bs;
-}
-
-template<typename T>
-std::enable_if_t<(quick::is_specialization<T, std::vector>::value ||
-                  quick::is_specialization<T, std::list>::value ||
-                  quick::is_specialization<T, std::unordered_set>::value ||
-                  quick::is_specialization<T, std::set>::value), ByteStream>&
-operator<<(ByteStream& bs, const T& input) {
-  bs << static_cast<size_t>(input.size());
-  for (const auto& item : input) {
-    bs << item;
-  }
-  return bs;
-}
-
-template<typename... Ts>
-ByteStream& operator<<(ByteStream& bs, const std::unordered_map<Ts...>& input) {
-  return detail::SerializeMap(bs, input);
-}
-
-template<typename... Ts>
-ByteStream& operator<<(ByteStream& bs, const std::map<Ts...>& input) {
-  return detail::SerializeMap(bs, input);
-}
-
-template<typename K, typename... Ts>
-ByteStream& operator>>(ByteStream& bs, std::unordered_map<K, Ts...>& output) {
-  size_t container_size;
-  bs >> container_size;
-  output.clear();
-  output.reserve(container_size);
-  K k;
-  for (uint32_t i = 0; i < container_size; i++) {
-    bs >> k;
-    bs >> output[k];
-  }
-  return bs;
-}
-
-template<typename K, typename... Ts>
-ByteStream& operator>>(ByteStream& bs, std::map<K, Ts...>& output) {
-  size_t container_size;
-  bs >> container_size;
-  output.clear();
-  K k;
-  for (uint32_t i = 0; i < container_size; i++) {
-    bs >> k;
-    bs >> output[k];
-  }
-  return bs;
-}
-
-template<typename T>
-ByteStream& operator>>(ByteStream& bs, std::vector<T>& output) {
-  size_t vector_size;
-  bs >> vector_size;
-  output.resize(vector_size);
-  for (uint32_t i = 0; i < vector_size; i++) {
-    bs >> output[i];
-  }
-  return bs;
-}
-
-template<typename T>
-std::enable_if_t<(quick::is_specialization<T, std::unordered_set>::value),
-                 ByteStream>&
-operator>>(ByteStream& bs, T& output) {
-  size_t container_size;
-  bs >> container_size;
-  output.clear();
-  output.reserve(container_size);
-  for (uint32_t i = 0; i < container_size; i++) {
-    typename T::value_type v;
-    bs >> v;
-    output.insert(std::move(v));
-  }
-  return bs;
-}
-
-
-template<typename T>
-std::enable_if_t<(quick::is_specialization<T, std::list>::value ||
-                  quick::is_specialization<T, std::set>::value), ByteStream>&
-operator>>(ByteStream& bs, T& output) {
-  size_t container_size;
-  bs >> container_size;
-  output.clear();
-  for (uint32_t i = 0; i < container_size; i++) {
-    typename T::value_type v;
-    bs >> v;
-    output.insert(std::move(v));
-  }
-  return bs;
-}
-
-
 }  // namespace quick
-
-namespace qk = quick;
-
 
 #endif  // QUICK_BYTE_STREAM_HPP_
