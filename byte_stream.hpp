@@ -4,6 +4,25 @@
 #ifndef QUICK_BYTE_STREAM_HPP_
 #define QUICK_BYTE_STREAM_HPP_
 
+// ByteStream is super intuitive, safe, reliable and easy to use utility for
+// binary serialisation and deserialization of complex and deeply nested C++
+// objects.
+// Learn more at README.md and byte_stream_test.cpp
+
+// Sample Use Case:
+// 
+// int x1 = 4;
+// vector<std::set<std::string>> v1 = {{"ABC", "D"}, {"Q"}};
+// quick::OByteStream obs;
+// obs << x1 << v1;
+// std::vector<std::byte> content = obs.Buffer();
+
+// quick::IByteStream ibs(content);
+// int x2;
+// vector<std::set<std::string>> v2;
+// ibs >> x2 >> v2;
+// assert(x1 == x2 && v1 == v2);
+
 #include <type_traits>
 #include <cstdint>
 #include <string>
@@ -72,8 +91,8 @@ class OByteStream {
   template<typename T>
   OByteStream& operator<<(const T& input) { Write(input); return *this; }
 
-  const std::vector<std::byte>& buffer() const { return output_bytes; }
-  std::vector<std::byte>& buffer() { return output_bytes; }
+  const std::vector<std::byte>& Buffer() const { return output_bytes; }
+  std::vector<std::byte>& Buffer() { return output_bytes; }
 
  private:
   void Write(const std::string_view& input) {

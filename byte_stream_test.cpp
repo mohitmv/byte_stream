@@ -40,7 +40,9 @@ void TestBasic() {
   obs << d1 << z1 << y1 << s1 << e1 << vp1;
   obs << m1 << vi1;
 
-  quick::IByteStream ibs(obs.buffer());
+  std::vector<std::byte> serialized_content = obs.Buffer();
+
+  quick::IByteStream ibs(serialized_content);
   ibs >> v2;
   ibs >> x2 >> s2;
   ibs >> d2 >> z2 >> y2 >> s2 >> e2 >> vp2 >> m2 >> vi2;
@@ -79,7 +81,11 @@ void TestClassMethod() {
   quick::OByteStream obs;
   S s1, s2 = {100, "Str1", make_tuple(1000, "Str2", vector<int> {10, 20, 30})};
   obs << s2 << 200 << "Abc";
-  quick::IByteStream ibs(obs.buffer());
+
+
+  std::vector<std::byte> serialized_content = obs.Buffer();
+  quick::IByteStream ibs(serialized_content);
+
   int num;
   string tmp_str;
   ibs >> s1 >> num >> tmp_str;
